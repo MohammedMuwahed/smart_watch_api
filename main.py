@@ -162,3 +162,80 @@ def debug_db():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB read failed: {e}")
+
+# ---------------- NEW: GET SETTINGS ----------------
+@app.get("/device/settings/sleep")
+def get_sleep_settings():
+    """
+    Return the configured 'sleepingStatus' for lights and curtain.
+    """
+    if not _firebase_available:
+        raise HTTPException(status_code=503, detail="Firestore not initialized")
+    try:
+        lights_doc = _firestore_client.document(DOC_DEVICE_LIGHTS).get()
+        curtain_doc = _firestore_client.document(DOC_DEVICE_CURTAIN).get()
+
+        lights = lights_doc.to_dict() if lights_doc.exists else {}
+        curtain = curtain_doc.to_dict() if curtain_doc.exists else {}
+
+        return {
+            "lights": {"sleepingStatus": lights.get("sleepingStatus")},
+            "curtain": {"sleepingStatus": curtain.get("sleepingStatus")}
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read sleep settings: {e}")
+
+
+@app.get("/device/settings/not-sleep")
+def get_not_sleep_settings():
+    """
+    Return the configured 'notSleepingStatus' for lights and curtain.
+    """
+    if not _firebase_available:
+        raise HTTPException(status_code=503, detail="Firestore not initialized")
+    try:
+        lights_doc = _firestore_client.document(DOC_DEVICE_LIGHTS).get()
+        curtain_doc = _firestore_client.document(DOC_DEVICE_CURTAIN).get()
+
+        lights = lights_doc.to_dict() if lights_doc.exists else {}
+        curtain = curtain_doc.to_dict() if curtain_doc.exists else {}
+
+        return {
+            "lights": {"notSleepingStatus": lights.get("notSleepingStatus")},
+            "curtain": {"notSleepingStatus": curtain.get("notSleepingStatus")}
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read not-sleep settings: {e}")
+
+
+@app.get("/state")
+def get_state():
+    """
+    Return current global sleep state document.
+    """
+    if not _firebase_available:
+        raise HTTPException(status_code=503, detail="Firestore not initialized")
+    try:
+        doc = _firestore_client.document(DOC_STATE).get()
+        if doc.exists:
+            data = doc.to_dict()
+            return {"isSleeping": data.get("isSleeping")}
+        return {"isSleeping": None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read state: {e}")
+
+
+@app.get("/state/is-sleeping")
+def get_is_sleeping():
+    """
+    Convenience endpoint returning only the boolean or null if missing.
+    """
+    if not _firebase_available:
+        raise HTTPException(status_code=503, detail="Firestore not initialized")
+    try:
+        doc = _firestore_client.document(DOC_STATE).get()
+        if doc.exists:
+            return {"isSleeping": bool(doc.to_dict().get("isSleeping"))}
+        return {"isSleeping": None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read isSleeping: {e}")

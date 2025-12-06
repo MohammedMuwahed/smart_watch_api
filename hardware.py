@@ -1,75 +1,41 @@
+import os
 import time
-import RPi.GPIO as GPIO
+import json
 
-# --- Realtime Database integration (optional) ---
+# Try hardware GPIO, fall back to local/mock RPi package if needed
 try:
-    from firebase_admin import db
-    _firebase_available = True
+    import RPi.GPIO as GPIO
 except Exception:
-    _firebase_available = False
+    try:
+        from RPi import GPIO  # repo mock: /RPi/GPIO.py
+    except Exception:
+        # minimal runtime-safe mock
+        class _DummyPWM:
+            def __init__(self, pin, freq): pass
+            def start(self, d): pass
+            def ChangeDutyCycle(self, d): pass
+            def stop(self): pass
 
+        class _MockGPIO:
+            BCM = "BCM"; OUT = "OUT"; LOW = 0; HIGH = 1
+            def setmode(self, m): print("[MOCK GPIO] setmode", m)
+            def setwarnings(self, f): pass
+            def setup(self, p, m): print(f"[MOCK GPIO] setup {p} {m}")
+            def output(self, p, v): print(f"[MOCK GPIO] output {p} -> {v}")
+            def PWM(self, p, f): return _DummyPWM(p, f)
+            def cleanup(self): print("[MOCK GPIO] cleanup")
+        GPIO = _MockGPIO()
 
-def _mock_db_get(path):
-    # Minimal mock values used for local testing
-    if path.endswith('/device/lights') or path.endswith('/device/lights/'):
-        return {"sleepingStatus": True, "notSleepingStatus": True, "active": False}
-    if path.endswith('/device/curtain') or path.endswith('/device/curtain/'):
-        return {"sleepingStatus": True, "notSleepingStatus": True, "active": False}
-    if path.endswith('/state/update') or path.endswith('/state/update/'):
-        return {"isSleeping": False}
-    return {}
+# Try requests, fallback to urllib
+try:
+    import requests
+except Exception:
+    requests = None
+    import urllib.request
+    import urllib.error
 
-
-def push_state(is_sleeping: bool):
-    """Push the sleep state to `/state/update` in Realtime DB (or print when mock)."""
-    if _firebase_available:
-        try:
-            db.reference('/state/update').set({"isSleeping": is_sleeping})
-        except Exception as e:
-            print(f"[DB ERROR] Failed to push state: {e}")
-    else:
-        print(f"[MOCK DB] set /state/update -> {{'isSleeping': {is_sleeping}}}")
-
-
-def get_device_config(device: str):
-    """Read `/device/{device}` from Realtime DB, return dict (or mock)."""
-    path = f"/device/{device}"
-    if _firebase_available:
-        try:
-            ref = db.reference(path)
-            return ref.get() or {}
-        except Exception as e:
-            print(f"[DB ERROR] Failed to read {path}: {e}")
-            return {}
-    else:
-        return _mock_db_get(path)
-
-
-def apply_device_actions(is_sleeping: bool):
-    """Read device configs and actuate hardware accordingly."""
-    lights = get_device_config('lights')
-    curtain = get_device_config('curtain')
-
-    if is_sleeping:
-        light_action = lights.get('sleepingStatus')
-        curtain_action = curtain.get('sleepingStatus')
-    else:
-        light_action = lights.get('notSleepingStatus')
-        curtain_action = curtain.get('notSleepingStatus')
-
-    # Apply light action
-    if light_action is True:
-        turn_on_lamp()
-    else:
-        turn_off_lamp()
-
-    # Apply curtain action — on this project we use `activate_servo()` to move the curtain
-    # If curtain_action is True we call `activate_servo()`; otherwise we do not move it.
-    if curtain_action is True:
-        activate_servo()
-    else:
-        print("Curtain action: no movement (configured to inactive).")
-
+# server base (hardware posts to the server that updates Firestore)
+SERVER_BASE = os.environ.get("SMART_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
 
 # ---------------- GPIO SETUP ----------------
 LAMP_PIN = 17  
@@ -87,30 +53,144 @@ servo.start(0)
 
 # ---------------- ACTION FUNCTIONS ----------------
 def turn_off_lamp():
-    print("Checking lamp and turning it OFF...")
     GPIO.output(LAMP_PIN, GPIO.LOW)
-    print("Lamp is now OFF.\n")
+    print("[HW] Lamp -> OFF")
 
 def turn_on_lamp():
-    print("Turning lamp ON...")
     GPIO.output(LAMP_PIN, GPIO.HIGH)
-    print("Lamp is now ON.\n")
+    print("[HW] Lamp -> ON")
 
-def activate_servo():
+def activate_servo(action="toggle"):
     """
-    Rotate continuous servo for 1080 degrees (~3 full turns)
+    action: "close" | "open" | "toggle"
+    For mock/hardware the same PWM sequence is used; prints clarify intent.
     """
-    print("Activating servo, rotating blinds 1080 degrees...")
+    if action == "close":
+        print("[HW] Curtain -> CLOSE (servo action)")
+    elif action == "open":
+        print("[HW] Curtain -> OPEN (servo action)")
+    else:
+        print("[HW] Curtain -> TOGGLE (servo action)")
 
-    # continuous rotation forward
-    servo.ChangeDutyCycle(8.5)   # Forward rotation (adjust if needed)
-    time.sleep(3)                # Spin long enough to complete 3 rotations
+    try:
+        # servo forward for a short time, then stop — adjust duty/time for real hardware
+        servo.ChangeDutyCycle(8.5)
+        time.sleep(3)
+        servo.ChangeDutyCycle(7.5)
+        time.sleep(0.2)
+    except Exception as e:
+        print(f"[WARN] Servo control failed (mock/hw): {e}")
 
-    # stop the servo
-    servo.ChangeDutyCycle(7.5)   # Stop
-    time.sleep(0.5)
+    if action == "close":
+        print("[HW] Curtain state: CLOSED\n")
+    elif action == "open":
+        print("[HW] Curtain state: OPEN\n")
+    else:
+        print("[HW] Curtain action complete (state depends on mechanical setup)\n")
 
-    print("Curtains fully opened (1080° rotation).\n")
+
+# ---------------- HTTP Helpers (talk to main API server) ----------------
+def _post_update_sleep(is_sleeping: bool):
+    url = f"{SERVER_BASE}/update-sleep"
+    payload = {"isSleeping": bool(is_sleeping)}
+    try:
+        if requests:
+            r = requests.post(url, json=payload, timeout=5)
+            r.raise_for_status()
+            return r.json()
+        else:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.load(resp)
+    except Exception as e:
+        print(f"[WARN] Failed POST {url}: {e}")
+        return None
+
+def _get_sleep_settings():
+    url = f"{SERVER_BASE}/device/settings/sleep"
+    try:
+        if requests:
+            r = requests.get(url, timeout=5)
+            r.raise_for_status()
+            return r.json()
+        else:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                return json.load(resp)
+    except Exception as e:
+        print(f"[WARN] Failed GET {url}: {e}")
+        return None
+
+def _get_not_sleep_settings():
+    url = f"{SERVER_BASE}/device/settings/not-sleep"
+    try:
+        if requests:
+            r = requests.get(url, timeout=5)
+            r.raise_for_status()
+            return r.json()
+        else:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                return json.load(resp)
+    except Exception as e:
+        print(f"[WARN] Failed GET {url}: {e}")
+        return None
+
+# ---------------- APPLY ACTIONS BASED ON SETTINGS ----------------
+def handle_sleep_event():
+    """
+    On sleep:
+    - POST isSleeping=True
+    - read sleep settings; if lights.sleepingStatus==true -> turn off lamp
+                           if curtain.sleepingStatus==true -> close curtain
+    """
+    print("[HW] Sleep detected → notifying server and applying sleep settings.")
+    _post_update_sleep(True)
+    cfg = _get_sleep_settings()
+    if not cfg:
+        print("[HW] No sleep settings available; skipping actions.")
+        return
+
+    lights_cfg = cfg.get("lights", {})
+    curtain_cfg = cfg.get("curtain", {})
+
+    if lights_cfg.get("sleepingStatus") is True:
+        turn_off_lamp()
+    else:
+        print("[HW] Lights: stay as-is on sleep.")
+
+    if curtain_cfg.get("sleepingStatus") is True:
+        activate_servo("close")
+    else:
+        print("[HW] Curtain: stay as-is on sleep.")
+
+
+def handle_wake_event():
+    """
+    On wake:
+    - POST isSleeping=False
+    - read not-sleep settings; if lights.notSleepingStatus==true -> turn on lamp
+                                if curtain.notSleepingStatus==true -> open curtain
+    """
+    print("[HW] Wake detected → notifying server and applying wake settings.")
+    _post_update_sleep(False)
+    cfg = _get_not_sleep_settings()
+    if not cfg:
+        print("[HW] No not-sleep settings available; skipping actions.")
+        return
+
+    lights_cfg = cfg.get("lights", {})
+    curtain_cfg = cfg.get("curtain", {})
+
+    if lights_cfg.get("notSleepingStatus") is True:
+        turn_on_lamp()
+    else:
+        print("[HW] Lights: stay as-is on wake.")
+
+    if curtain_cfg.get("notSleepingStatus") is True:
+        activate_servo("open")
+    else:
+        print("[HW] Curtain: stay as-is on wake.")
+
 
 # ---------------- SAMPLE HEART RATE + TIME DATA ----------------
 resting_hr = 65
@@ -182,14 +262,12 @@ for minute, (hr, current_time) in enumerate(zip(hr_samples, time_samples), start
     status = detector.process_heart_rate(hr, current_time)
 
     if status == "SLEEP_DETECTED":
-        print(" SLEEP DETECTED: Lamp OFF confirmed.\n")
+        print(" SLEEP DETECTED: applying configured sleep actions.\n")
+        handle_sleep_event()
 
     if status == "WAKE_DETECTED":
-        print("WAKE DETECTED: Opening curtains with servo...\n")
-        activate_servo()
-
-        if not detector.lamps_locked:
-            turn_on_lamp()
+        print("WAKE DETECTED: applying configured wake actions.\n")
+        handle_wake_event()
 
     time.sleep(1)
 
