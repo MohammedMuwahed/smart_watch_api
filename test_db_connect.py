@@ -2,7 +2,8 @@ import os
 from firebase_admin import credentials, initialize_app, db
 
 # Use your Realtime Database URL here (not the console URL)
-URL = "https://smartwatch-university-project.firebaseio.com"  # <- replace with the exact RTDB URL from the console
+#URL = "https://smartwatch-university-project.firebaseio.com"  # <- replace with the exact RTDB URL from the console
+URL = "https://smartwatch-university-project.web.app"
 
 if not os.path.exists("serviceAccountKey.json"):
     raise SystemExit("serviceAccountKey.json missing")
