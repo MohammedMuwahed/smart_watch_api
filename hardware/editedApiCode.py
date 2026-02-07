@@ -2,14 +2,13 @@ import os
 import time
 import json
 
-# Try hardware GPIO, fall back to local/mock RPi package if needed
 try:
     import RPi.GPIO as GPIO
 except Exception:
     try:
-        from RPi import GPIO  # repo mock: /RPi/GPIO.py
+        from RPi import GPIO  
     except Exception:
-        # minimal runtime-safe mock
+        
         class _DummyPWM:
             def __init__(self, pin, freq): pass
             def start(self, d): pass
@@ -26,7 +25,6 @@ except Exception:
             def cleanup(self): print("[MOCK GPIO] cleanup")
         GPIO = _MockGPIO()
 
-# Try requests, fallback to urllib
 try:
     import requests
 except Exception:
@@ -37,7 +35,7 @@ except Exception:
 # server base (hardware posts to the server that updates Firestore)
 SERVER_BASE = os.environ.get("SMART_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
 
-# ---------------- GPIO SETUP ----------------
+#                                                         GPIO SETUP 
 LAMP_PIN = 17  
 SERVO_PIN = 18   # SERVO PIN
 
@@ -51,7 +49,7 @@ GPIO.setup(SERVO_PIN, GPIO.OUT)
 servo = GPIO.PWM(SERVO_PIN, 50)  # 50 Hz PWM
 servo.start(0)
 
-# ---------------- ACTION FUNCTIONS ----------------
+#                                          ACTION FUNCTIONS
 def turn_off_lamp():
     GPIO.output(LAMP_PIN, GPIO.LOW)
     print("[HW] Lamp -> OFF")
@@ -60,10 +58,33 @@ def turn_on_lamp():
     GPIO.output(LAMP_PIN, GPIO.HIGH)
     print("[HW] Lamp -> ON")
 
+def activate_servo_360():
+    """
+    Rotate servo 360° once (morning wake-up curtain opening)
+    """
+    print("[HW] Curtain -> OPENING (360° rotation)")
+    
+    try:
+        # first 180°
+        servo.ChangeDutyCycle(2 + (180 / 18))
+        time.sleep(0.6)
+        # back to 0°
+        servo.ChangeDutyCycle(2 + (0 / 18))
+        time.sleep(0.6)
+        # second 180° to complete 360
+        servo.ChangeDutyCycle(2 + (180 / 18))
+        time.sleep(0.6)
+        # back to 0° and stop
+        servo.ChangeDutyCycle(7.5)
+        time.sleep(0.3)
+        print("[HW] Curtain -> OPEN (360° complete)\n")
+    except Exception as e:
+        print(f"[WARN] Servo 360° control failed: {e}")
+
 def activate_servo(action="toggle"):
     """
     action: "close" | "open" | "toggle"
-    For mock/hardware the same PWM sequence is used; prints clarify intent.
+    Used for sleep event curtain closing
     """
     if action == "close":
         print("[HW] Curtain -> CLOSE (servo action)")
@@ -73,7 +94,7 @@ def activate_servo(action="toggle"):
         print("[HW] Curtain -> TOGGLE (servo action)")
 
     try:
-        # servo forward for a short time, then stop — adjust duty/time for real hardware
+        # servo forward for a short time, then stop
         servo.ChangeDutyCycle(8.5)
         time.sleep(3)
         servo.ChangeDutyCycle(7.5)
@@ -86,10 +107,10 @@ def activate_servo(action="toggle"):
     elif action == "open":
         print("[HW] Curtain state: OPEN\n")
     else:
-        print("[HW] Curtain action complete (state depends on mechanical setup)\n")
+        print("[HW] Curtain action complete\n")
 
 
-# ---------------- HTTP Helpers (talk to main API server) ----------------
+#  ( we are talking to main API server) 
 def _post_update_sleep(is_sleeping: bool):
     url = f"{SERVER_BASE}/update-sleep"
     payload = {"isSleeping": bool(is_sleeping)}
@@ -135,7 +156,7 @@ def _get_not_sleep_settings():
         print(f"[WARN] Failed GET {url}: {e}")
         return None
 
-# ---------------- APPLY ACTIONS BASED ON SETTINGS ----------------
+# APPLY ACTIONS BASED ON SETTINGS, which means based on our api user prefrences we fetch from the firrbase database
 def handle_sleep_event():
     """
     On sleep:
@@ -169,7 +190,7 @@ def handle_wake_event():
     On wake:
     - POST isSleeping=False
     - read not-sleep settings; if lights.notSleepingStatus==true -> turn on lamp
-                                if curtain.notSleepingStatus==true -> open curtain
+                                if curtain.notSleepingStatus==true -> open curtain (360°)
     """
     print("[HW] Wake detected → notifying server and applying wake settings.")
     _post_update_sleep(False)
@@ -187,12 +208,12 @@ def handle_wake_event():
         print("[HW] Lights: stay as-is on wake.")
 
     if curtain_cfg.get("notSleepingStatus") is True:
-        activate_servo("open")
+        activate_servo_360()  # Use 360° rotation for morning wake
     else:
         print("[HW] Curtain: stay as-is on wake.")
 
 
-# ---------------- SAMPLE HEART RATE + TIME DATA ----------------
+# SAMPLE HEART RATE + TIME DATA "our mock data "
 resting_hr = 65
 hr_samples = [70, 67, 66, 64, 63, 62, 60, 59, 60, 58, 57, 62, 66, 69, 72, 75, 78]
 time_samples = [
@@ -200,7 +221,7 @@ time_samples = [
     "00:30","02:00","06:00","07:30","08:30","09:30","10:30","11:30"
 ]
 
-# ---------------- SLEEP DETECTOR CLASS ----------------
+# the sleep detector class, part of the sim
 class SleepDetector:
     def __init__(self, resting_hr, sleep_threshold=5, required_minutes=3):
         self.resting_hr = resting_hr
@@ -209,6 +230,7 @@ class SleepDetector:
         self.sleep_counter = 0
         self.is_sleeping = False
         self.lamps_locked = False
+        self.servo_activated_today = False  # NEW: Track if servo ran today
 
     def is_between(self, current, start, end):
         current = int(current.replace(":", ""))
@@ -220,40 +242,51 @@ class SleepDetector:
             return current >= start or current <= end
 
     def process_heart_rate(self, hr, current_time):
+        #  RESET SERVO FLAG AFTER MIDNIGHT 
+        if self.is_between(current_time, "00:00", "03:59"):
+            if self.servo_activated_today:
+                print("[INFO] New day detected - resetting servo activation flag")
+                self.servo_activated_today = False
 
-        # ----------- NIGHT TIME 20:00 → 04:00 -----------          
+        # NIGHT TIME 20:00 → 04:00           
         if hr < self.resting_hr and self.is_between(current_time, "20:00", "04:00"):
             turn_off_lamp()
             self.lamps_locked = True
 
-        # ----------- UNLOCK LAMPS AFTER 12:00 PM -----------          
+        # UNLOCK LAMPS AFTER 12:00 PM           
         if self.lamps_locked and self.is_between(current_time, "12:00", "23:59"):
             print("Unlocking lamps after 12:00 PM")
             self.lamps_locked = False
 
-        # ----------- SLEEP DETECTION -----------
+        #            detecting SLEEP
         if hr <= self.resting_hr - self.sleep_threshold:
             self.sleep_counter += 1
             if self.sleep_counter >= self.required_minutes and not self.is_sleeping:
                 self.is_sleeping = True
                 return "SLEEP_DETECTED"
         else:
-            # ----------- WAKE DETECTION AFTER 04:00 AM -----------
-            if self.is_sleeping and hr > self.resting_hr and self.is_between(current_time, "04:01", "23:59"):
+            #WAKE DETECTION AFTER 04:00 AM 
+            # FIXED: Only trigger if servo which is the curtains in our case  hasn't activated today AND time is after 4am AND HR above resting
+            if (self.is_sleeping and 
+                hr > self.resting_hr and 
+                self.is_between(current_time, "04:01", "23:59") and
+                not self.servo_activated_today):
+                
                 self.is_sleeping = False
                 self.sleep_counter = 0
+                self.servo_activated_today = True 
                 return "WAKE_DETECTED"
 
             self.sleep_counter = 0
 
         return None
 
-# ---------------- SIMULATION ----------------
+# the simulatiob code 
 detector = SleepDetector(resting_hr)
 
 print("\n Starting Sleep Automation Simulation...\n")
 
-# Lamp ON at start
+
 GPIO.output(LAMP_PIN, GPIO.HIGH)
 print("Lamp is ON at start.\n")
 
@@ -262,7 +295,7 @@ for minute, (hr, current_time) in enumerate(zip(hr_samples, time_samples), start
     status = detector.process_heart_rate(hr, current_time)
 
     if status == "SLEEP_DETECTED":
-        print(" SLEEP DETECTED: applying configured sleep actions.\n")
+        print("SLEEP DETECTED: applying configured sleep actions.\n")
         handle_sleep_event()
 
     if status == "WAKE_DETECTED":
@@ -271,5 +304,5 @@ for minute, (hr, current_time) in enumerate(zip(hr_samples, time_samples), start
 
     time.sleep(1)
 
-print(" Simulation Finished.")
+print("Simulation Finished.")
 GPIO.cleanup()

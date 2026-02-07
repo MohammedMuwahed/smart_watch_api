@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import firebase_admin
 from firebase_admin import credentials, firestore
+from fastapi.middleware.cors import CORSMiddleware
 
 # Firestore initialization (safe)
 _firestore_client = None
@@ -28,6 +29,21 @@ app = FastAPI(
     title="Smartwatch Automation API",
     description="Controls curtain + light state based on sleeping status (Firestore backend).",
     version="1.0",
+)
+
+# Allow CORS (set ALLOWED_ORIGINS env var to comma-separated list, default "*")
+_allowed_origins = os.getenv("ALLOWED_ORIGINS", "*")
+if _allowed_origins.strip() == "*":
+    origins = ["*"]
+else:
+    origins = [o.strip() for o in _allowed_origins.split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ---------------- MODELS ----------------

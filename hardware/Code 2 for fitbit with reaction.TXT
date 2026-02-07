@@ -1,0 +1,175 @@
+import os
+import time
+import requests
+from requests_oauthlib import OAuth2Session
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
+
+# Load environment variables
+load_dotenv()
+
+CLIENT_ID = os.getenv('FITBIT_CLIENT_ID')
+CLIENT_SECRET = os.getenv('FITBIT_CLIENT_SECRET')
+REDIRECT_URI = os.getenv('FITBIT_REDIRECT_URI')
+ACCESS_TOKEN = os.getenv('FITBIT_ACCESS_TOKEN')
+REFRESH_TOKEN = os.getenv('FITBIT_REFRESH_TOKEN')
+USER_ID = os.getenv('FITBIT_USER_ID')
+
+TOKEN_URL = 'https://api.fitbit.com/oauth2/token'
+
+# Scopes required for heart rate
+SCOPE = ['heartrate', 'activity', 'profile']
+
+# Set your timezone offset from UTC (in hours)
+TIMEZONE_OFFSET = 1
+
+# Automation settings
+RESTING_HEART_RATE = 65
+
+# State tracking to prevent repeated actions
+automation_state = {
+    'lights_off': False,
+    'curtains_opened': False
+}
+
+def refresh_token(session):
+    extra = {
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+    }
+    token = session.refresh_token(TOKEN_URL, refresh_token=REFRESH_TOKEN, **extra)
+    return token
+
+def get_current_heartrate(session):
+    today = datetime.now().strftime('%Y-%m-%d')
+    url_1min = f'https://api.fitbit.com/1/user/{USER_ID}/activities/heart/date/{today}/1d/1min.json'
+    
+    resp = session.get(url_1min)
+    if resp.status_code == 200:
+        data = resp.json()
+        try:
+            dataset = data['activities-heart-intraday']['dataset']
+            if dataset:
+                latest = dataset[-1]
+                hr_time = latest['time']
+                
+                # Convert UTC time to local time
+                utc_time = datetime.strptime(hr_time, "%H:%M:%S")
+                local_time = utc_time + timedelta(hours=TIMEZONE_OFFSET)
+                local_time_str = local_time.strftime("%H:%M:%S")
+                
+                current_local = datetime.now()
+                data_time = datetime.strptime(local_time_str, "%H:%M:%S").replace(
+                    year=current_local.year, 
+                    month=current_local.month, 
+                    day=current_local.day
+                )
+                
+                delay_seconds = (current_local - data_time).total_seconds()
+                delay_minutes = int(delay_seconds / 60)
+                
+                print(f"Current time: {current_local.strftime('%H:%M:%S')}")
+                print(f"Latest data: {local_time_str} (Delay: ~{delay_minutes} min)")
+                
+                return latest['value'], local_time_str
+            else:
+                return None, None
+        except Exception as e:
+            print(f"Error parsing data: {e}")
+            return None, None
+    elif resp.status_code == 429:
+        print('Rate limit exceeded. Waiting before retrying...')
+        time.sleep(60)
+        return get_current_heartrate(session)
+    else:
+        print(f'Error: {resp.status_code} {resp.text}')
+        return None, None
+
+def simulate_automation(heart_rate, time_str):
+    """
+    Simulate smart bedroom automation based on heart rate and time.
+    Only prints actions, does not control hardware.
+    """
+    global automation_state
+    
+    # Parse time
+    hour = int(time_str.split(':')[0])
+    minute = int(time_str.split(':')[1])
+    time_minutes = hour * 60 + minute
+    
+    # Define time ranges in minutes from midnight
+    night_start = 20 * 60  # 20:00
+    night_end = 4 * 60     # 04:00
+    wake_start = 4 * 60    # 04:00
+    wake_end = 12 * 60     # 12:00
+    
+    # Check if in night time (20:00 to 04:00, wraps around midnight)
+    in_night_time = time_minutes >= night_start or time_minutes < night_end
+    
+    # Check if in wake-up time (04:00 to 12:00)
+    in_wake_time = wake_start <= time_minutes < wake_end
+    
+    action_taken = False
+    
+    # Rule 1: Night/Sleep behavior
+    if heart_rate < RESTING_HEART_RATE and in_night_time:
+        if not automation_state['lights_off']:
+            print("Lights turned OFF (rest/sleep mode)")
+            automation_state['lights_off'] = True
+            automation_state['curtains_opened'] = False  # Reset wake-up state
+            action_taken = True
+    else:
+        # Reset lights_off state when conditions no longer met
+        if automation_state['lights_off']:
+            automation_state['lights_off'] = False
+    
+    # Rule 2: Wake-up behavior
+    if heart_rate > RESTING_HEART_RATE and in_wake_time:
+        if not automation_state['curtains_opened']:
+            print("Curtains opened (wake-up detected)")
+            automation_state['curtains_opened'] = True
+            automation_state['lights_off'] = False  # Reset sleep state
+            action_taken = True
+    else:
+        # Reset curtains_opened state when outside wake time
+        if not in_wake_time:
+            automation_state['curtains_opened'] = False
+    
+    # Rule 3: No action
+    if not action_taken:
+        print("No action taken")
+
+def main(interval=60):
+    token = {
+        'access_token': ACCESS_TOKEN,
+        'refresh_token': REFRESH_TOKEN,
+        'token_type': 'Bearer',
+        'expires_in': 3600,
+    }
+    
+    session = OAuth2Session(CLIENT_ID, token=token, auto_refresh_url=TOKEN_URL,
+                          auto_refresh_kwargs={
+                              'client_id': CLIENT_ID,
+                              'client_secret': CLIENT_SECRET,
+                          },
+                          token_updater=None)
+    
+    print(f'Starting Fitbit heart rate fetcher... (Timezone: UTC+{TIMEZONE_OFFSET})')
+    print(f'Smart Bedroom Automation Simulation Active')
+    print(f'Resting HR Threshold: {RESTING_HEART_RATE} bpm')
+    print('Note: Fitbit API has inherent delays (typically 15-60 minutes)\n')
+    print('='*60)
+    
+    while True:
+        hr, t = get_current_heartrate(session)
+        if hr is not None:
+            print(f'\n[{t}] Heart Rate: {hr} bpm')
+            simulate_automation(hr, t)
+        else:
+            print('\nNo heart rate data available.')
+        
+        print('-'*60)
+        time.sleep(interval)
+
+if __name__ == '__main__':
+    main(interval=60)
