@@ -2,7 +2,6 @@ import os
 import time
 import json
 
-# ================= GPIO SETUP (REAL OR MOCK) =================
 try:
     import RPi.GPIO as GPIO
 except Exception:
@@ -10,7 +9,7 @@ except Exception:
         from RPi import GPIO
     except Exception:
         class _DummyPWM:
-            def __init__(self, pin, freq): pass
+            def _init_(self, pin, freq): pass
             def start(self, d): pass
             def ChangeDutyCycle(self, d): pass
             def stop(self): pass
@@ -25,7 +24,6 @@ except Exception:
             def cleanup(self): print("[MOCK GPIO] cleanup")
         GPIO = _MockGPIO()
 
-# ================= HTTP SETUP =================
 try:
     import requests
 except Exception:
@@ -37,7 +35,7 @@ SERVER_BASE = os.environ.get(
     "SMART_SERVER_URL", "http://127.0.0.1:8000"
 ).strip().rstrip("/")
 
-# ================= PINS =================
+
 LAMP_PIN = 17
 SERVO_PIN = 18
 
@@ -49,7 +47,7 @@ GPIO.setup(SERVO_PIN, GPIO.OUT)
 servo = GPIO.PWM(SERVO_PIN, 50)
 servo.start(0)
 
-# ================= HARDWARE ACTIONS =================
+
 def turn_off_lamp():
     GPIO.output(LAMP_PIN, GPIO.LOW)
     print("[HW] Lamp -> OFF")
@@ -82,7 +80,6 @@ def activate_servo(action):
     except Exception as e:
         print(f"[WARN] Servo error: {e}")
 
-# ================= SERVER COMMUNICATION =================
 def _post_update_sleep(is_sleeping):
     url = f"{SERVER_BASE}/update-sleep"
     payload = {"isSleeping": bool(is_sleeping)}
@@ -111,7 +108,6 @@ def _get_settings(endpoint):
         print(f"[WARN] GET failed: {e}")
         return None
 
-# ================= EVENT HANDLERS =================
 def handle_sleep_event():
     print("[EVENT] Sleep detected")
     _post_update_sleep(True)
@@ -140,9 +136,9 @@ def handle_wake_event():
     if cfg.get("curtain", {}).get("notSleepingStatus") is True:
         activate_servo("open")
 
-# ================= SLEEP DETECTOR =================
+
 class SleepDetector:
-    def __init__(self, resting_hr, sleep_threshold=5, required_minutes=3):
+    def _init_(self, resting_hr, sleep_threshold=5, required_minutes=3):
         self.resting_hr = resting_hr
         self.sleep_threshold = sleep_threshold
         self.required_minutes = required_minutes
@@ -161,31 +157,30 @@ class SleepDetector:
         return s <= c <= e if s <= e else c >= s or c <= e
 
     def process_heart_rate(self, hr, current_time):
-        # Reset daily servo flag after midnight
+        
         if self.is_between(current_time, "00:00", "03:59"):
             if self.servo_activated_today:
                 print("[INFO] New day → resetting curtain flag")
                 self.servo_activated_today = False
 
-        # Night lamp auto-off
         if hr < self.resting_hr and self.is_between(current_time, "20:00", "04:00"):
             if not self.lamps_locked:
                 turn_off_lamp()
                 self.lamps_locked = True
 
-        # Midday lamp unlock
+       
         if self.lamps_locked and self.is_between(current_time, "12:00", "19:59"):
             print("[INFO] Lamps unlocked")
             self.lamps_locked = False
 
-        # Sleep detection
+      
         if hr <= self.resting_hr - self.sleep_threshold:
             self.sleep_counter += 1
             if self.sleep_counter >= self.required_minutes and not self.is_sleeping:
                 self.is_sleeping = True
                 return "SLEEP_DETECTED"
         else:
-            # Wake detection (ONCE PER DAY)
+            
             if (
                 self.is_sleeping
                 and hr > self.resting_hr
@@ -201,7 +196,6 @@ class SleepDetector:
 
         return None
 
-# ================= SIMULATION =================
 resting_hr = 65
 hr_samples = [70,67,66,64,63,62,60,59,60,58,57,62,66,69,72,75,78]
 time_samples = [
